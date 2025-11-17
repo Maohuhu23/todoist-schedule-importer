@@ -39,6 +39,64 @@
           }
         }
       }
+    },
+    "/query_tasks": {
+      "post": {
+        "operationId": "queryTodoistTasks",
+        "summary": "查询 Todoist 任务列表",
+        "description": "按项目、标签、时间范围筛选任务，用于回答'今天有什么课'、'下周五的安排'等问题。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TasksQuery"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回符合条件的任务列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TasksQueryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/free_slots": {
+      "post": {
+        "operationId": "computeFreeSlots",
+        "summary": "计算空档时间",
+        "description": "基于现有任务计算指定时间范围内的空闲时间段，用于智能安排学习块。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreeSlotRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回空闲时间段列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeSlotResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -237,6 +295,216 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ErrorInfo"
+            }
+          }
+        }
+      },
+      "TasksQuery": {
+        "type": "object",
+        "description": "查询任务的筛选条件",
+        "properties": {
+          "project_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "要查询的项目名列表，例如 ['Schedule']；为空则查所有项目"
+          },
+          "label_filters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "必须同时包含的标签名列表，例如 ['FMath', 'school']"
+          },
+          "date_from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "筛选 due 在这个时间之后的任务（含）"
+          },
+          "date_to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "筛选 due 在这个时间之前的任务（含）"
+          },
+          "include_without_due": {
+            "type": "boolean",
+            "default": true,
+            "description": "是否包含没有 due 的任务"
+          },
+          "include_completed": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否包含已完成任务（当前实现仅支持未完成）"
+          },
+          "timezone": {
+            "type": "string",
+            "default": "Asia/Singapore",
+            "description": "用于把日期筛选统一到同一时区"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 200,
+            "description": "最多返回多少条任务，防止一次返回过多数据"
+          }
+        }
+      },
+      "TaskSummary": {
+        "type": "object",
+        "description": "任务摘要信息",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "project_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "project_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "section_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "section_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "default": 1
+          },
+          "due_datetime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "有具体时间的 due"
+          },
+          "due_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true,
+            "description": "只有日期的 due"
+          },
+          "raw_due_string": {
+            "type": "string",
+            "nullable": true,
+            "description": "Todoist 的 due.string，例如 'every Monday at 09:05'"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "nullable": true,
+            "description": "任务持续时长（分钟）"
+          },
+          "is_completed": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": ["id", "content"]
+      },
+      "TasksQueryResponse": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskSummary"
+            }
+          }
+        }
+      },
+      "FreeSlotRequest": {
+        "type": "object",
+        "description": "计算空档时间的请求",
+        "properties": {
+          "project_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "主要用来找日程的项目，例如 ['Schedule', 'Study Blocks']"
+          },
+          "label_filters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "把哪些标签视为'占用时间'的任务，例如 ['school', 'ielts']"
+          },
+          "date_from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "空档搜索起点"
+          },
+          "date_to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "空档搜索终点"
+          },
+          "timezone": {
+            "type": "string",
+            "default": "Asia/Singapore",
+            "description": "定义 date_from / date_to 所在时区"
+          },
+          "workday_start": {
+            "type": "string",
+            "default": "08:00",
+            "description": "每天视作可用时间的开始，例如 '08:00'"
+          },
+          "workday_end": {
+            "type": "string",
+            "default": "23:00",
+            "description": "每天视作可用时间的结束，例如 '23:00'"
+          },
+          "min_slot_minutes": {
+            "type": "integer",
+            "default": 45,
+            "description": "认为是'有效空档'的最短时长"
+          }
+        },
+        "required": ["date_from", "date_to"]
+      },
+      "FreeSlot": {
+        "type": "object",
+        "description": "一个空档时间段",
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "FreeSlotResponse": {
+        "type": "object",
+        "properties": {
+          "free_slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FreeSlot"
             }
           }
         }

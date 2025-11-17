@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import os
 import requests
 from enum import Enum
@@ -149,6 +149,124 @@ class ErrorInfo(BaseModel):
 class ImportResponse(BaseModel):
     created: List[CreatedTask]
     errors: List[ErrorInfo]
+
+
+# ---------- 查询任务相关模型 ----------
+
+class TasksQuery(BaseModel):
+    """
+    查询任务的筛选条件
+    """
+    project_names: Optional[List[str]] = Field(
+        default=None,
+        description="要查询的项目名列表，例如 ['Schedule']；为空则查所有项目"
+    )
+    label_filters: Optional[List[str]] = Field(
+        default=None,
+        description="必须同时包含的标签名列表，例如 ['FMath', 'school']"
+    )
+    date_from: Optional[datetime] = Field(
+        default=None,
+        description="筛选 due 在这个时间之后的任务（含）"
+    )
+    date_to: Optional[datetime] = Field(
+        default=None,
+        description="筛选 due 在这个时间之前的任务（含）"
+    )
+    include_without_due: bool = Field(
+        default=True,
+        description="是否包含没有 due 的任务"
+    )
+    include_completed: bool = Field(
+        default=False,
+        description="是否包含已完成任务（当前实现仅支持未完成）"
+    )
+    timezone: str = Field(
+        default="Asia/Singapore",
+        description="用于把日期筛选统一到同一时区"
+    )
+    limit: int = Field(
+        default=200,
+        gt=0,
+        le=1000,
+        description="最多返回多少条任务，防止一次返回过多数据"
+    )
+
+
+class TaskSummary(BaseModel):
+    """
+    任务摘要信息
+    """
+    id: str
+    content: str
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    section_id: Optional[str] = None
+    section_name: Optional[str] = None
+    labels: List[str] = Field(default_factory=list)
+    priority: int = 1
+    due_datetime: Optional[datetime] = None   # 有具体时间的
+    due_date: Optional[date] = None           # 只有日期的
+    raw_due_string: Optional[str] = None      # Todoist 的 due.string
+    duration_minutes: Optional[int] = None
+    is_completed: bool = False
+
+
+class TasksQueryResponse(BaseModel):
+    """
+    查询任务的响应
+    """
+    tasks: List[TaskSummary]
+
+
+# ---------- 空档计算相关模型 ----------
+
+class FreeSlotRequest(BaseModel):
+    """
+    计算空档时间的请求
+    """
+    project_names: Optional[List[str]] = Field(
+        default=None,
+        description="主要用来找日程的项目，例如 ['Schedule', 'Study Blocks']"
+    )
+    label_filters: Optional[List[str]] = Field(
+        default=None,
+        description="把哪些标签视为'占用时间'的任务，例如 ['school', 'ielts']"
+    )
+    date_from: datetime = Field(..., description="空档搜索起点")
+    date_to: datetime = Field(..., description="空档搜索终点")
+    timezone: str = Field(
+        default="Asia/Singapore",
+        description="定义 date_from / date_to 所在时区"
+    )
+    workday_start: str = Field(
+        default="08:00",
+        description="每天视作可用时间的开始，例如 '08:00'"
+    )
+    workday_end: str = Field(
+        default="23:00",
+        description="每天视作可用时间的结束，例如 '23:00'"
+    )
+    min_slot_minutes: int = Field(
+        default=45,
+        description="认为是'有效空档'的最短时长"
+    )
+
+
+class FreeSlot(BaseModel):
+    """
+    一个空档时间段
+    """
+    start: datetime
+    end: datetime
+
+
+class FreeSlotResponse(BaseModel):
+    """
+    空档计算的响应
+    """
+    free_slots: List[FreeSlot]
 
 
 # ---------- Todoist 帮助函数 ----------
@@ -507,3 +625,315 @@ def import_schedule(body: ImportRequest):
             )
 
     return ImportResponse(created=created, errors=errors)
+
+
+# ---------- 查询任务接口 ----------
+
+def fetch_tasks_from_todoist(project_id: Optional[str] = None) -> List[dict]:
+    """
+    从 Todoist 获取任务列表
+    """
+    headers = todoist_headers()
+    params = {}
+    if project_id:
+        params["project_id"] = project_id
+    
+    resp = requests.get(
+        f"{TODOIST_BASE_URL}/tasks",
+        headers=headers,
+        params=params,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def parse_task_due(due_obj: Optional[dict]) -> tuple:
+    """
+    解析 Todoist 任务的 due 字段
+    返回 (due_datetime, due_date, raw_due_string)
+    """
+    if not due_obj:
+        return None, None, None
+    
+    raw_string = due_obj.get("string")
+    
+    # 如果有 datetime 字段（带时间）
+    if "datetime" in due_obj and due_obj["datetime"]:
+        try:
+            dt = datetime.fromisoformat(due_obj["datetime"].replace("Z", "+00:00"))
+            return dt, None, raw_string
+        except:
+            pass
+    
+    # 如果只有 date 字段（只有日期）
+    if "date" in due_obj and due_obj["date"]:
+        try:
+            d = datetime.strptime(due_obj["date"], "%Y-%m-%d").date()
+            return None, d, raw_string
+        except:
+            pass
+    
+    return None, None, raw_string
+
+
+@app.post("/query_tasks", response_model=TasksQueryResponse)
+def query_tasks(query: TasksQuery):
+    """
+    查询 Todoist 任务列表，支持：
+    - 按项目名筛选
+    - 按标签筛选
+    - 按时间范围筛选
+    - 限制返回数量
+    """
+    try:
+        # 1. 获取项目和标签映射
+        project_map = fetch_projects()  # {name: id}
+        label_map = fetch_labels()      # {name: id}
+        
+        # 创建反向映射
+        project_id_to_name = {v: k for k, v in project_map.items()}
+        label_id_to_name = {v: k for k, v in label_map.items()}
+        
+        # 2. 确定要查询的项目
+        project_ids_to_query = []
+        if query.project_names:
+            for name in query.project_names:
+                if name in project_map:
+                    project_ids_to_query.append(project_map[name])
+        else:
+            # 查询所有项目
+            project_ids_to_query = list(project_map.values()) if project_map else [None]
+        
+        # 3. 获取所有任务
+        all_tasks = []
+        if not project_ids_to_query:
+            # 如果没有指定项目，查所有
+            all_tasks = fetch_tasks_from_todoist()
+        else:
+            for pid in project_ids_to_query:
+                tasks = fetch_tasks_from_todoist(pid)
+                all_tasks.extend(tasks)
+        
+        # 4. 获取所有相关项目的 section 映射
+        section_cache = {}  # {project_id: {section_id: section_name}}
+        for task in all_tasks:
+            pid = task.get("project_id")
+            if pid and pid not in section_cache:
+                try:
+                    sections = fetch_sections(pid)  # {name: id}
+                    section_cache[pid] = {v: k for k, v in sections.items()}  # {id: name}
+                except:
+                    section_cache[pid] = {}
+        
+        # 5. 过滤和转换任务
+        results = []
+        for task in all_tasks:
+            # 解析标签
+            task_label_ids = task.get("labels", [])
+            task_label_names = [label_id_to_name.get(lid, lid) for lid in task_label_ids]
+            
+            # 标签过滤
+            if query.label_filters:
+                if not all(label in task_label_names for label in query.label_filters):
+                    continue
+            
+            # 解析 due
+            due_datetime, due_date, raw_due_string = parse_task_due(task.get("due"))
+            
+            # 时间范围过滤
+            if query.date_from or query.date_to:
+                task_time = due_datetime or (datetime.combine(due_date, datetime.min.time()) if due_date else None)
+                
+                if not task_time:
+                    if not query.include_without_due:
+                        continue
+                else:
+                    if query.date_from and task_time < query.date_from:
+                        continue
+                    if query.date_to and task_time > query.date_to:
+                        continue
+            elif not (due_datetime or due_date) and not query.include_without_due:
+                continue
+            
+            # 获取 section 名称
+            section_id = task.get("section_id")
+            section_name = None
+            if section_id:
+                pid = task.get("project_id")
+                if pid in section_cache:
+                    section_name = section_cache[pid].get(section_id)
+            
+            # 解析 duration
+            duration_minutes = None
+            if task.get("duration"):
+                amount = task["duration"].get("amount")
+                unit = task["duration"].get("unit")
+                if amount and unit == "minute":
+                    duration_minutes = amount
+            
+            # 构造 TaskSummary
+            summary = TaskSummary(
+                id=str(task["id"]),
+                content=task["content"],
+                description=task.get("description"),
+                project_id=task.get("project_id"),
+                project_name=project_id_to_name.get(task.get("project_id")),
+                section_id=section_id,
+                section_name=section_name,
+                labels=task_label_names,
+                priority=task.get("priority", 1),
+                due_datetime=due_datetime,
+                due_date=due_date,
+                raw_due_string=raw_due_string,
+                duration_minutes=duration_minutes,
+                is_completed=task.get("is_completed", False)
+            )
+            results.append(summary)
+            
+            # 限制数量
+            if len(results) >= query.limit:
+                break
+        
+        # 6. 按时间排序
+        def sort_key(t: TaskSummary):
+            if t.due_datetime:
+                return (0, t.due_datetime)
+            elif t.due_date:
+                return (1, datetime.combine(t.due_date, datetime.min.time()))
+            else:
+                return (2, datetime.max)
+        
+        results.sort(key=sort_key)
+        
+        return TasksQueryResponse(tasks=results)
+    
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to query Todoist tasks: {e}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing query: {e}"
+        )
+
+
+# ---------- 空档计算接口 ----------
+
+@app.post("/free_slots", response_model=FreeSlotResponse)
+def compute_free_slots(request: FreeSlotRequest):
+    """
+    计算指定时间范围内的空档时间，支持：
+    - 按项目和标签筛选"占用时间"的任务
+    - 设置每天可用时间范围（workday_start ~ workday_end）
+    - 过滤最小空档时长
+    """
+    try:
+        # 1. 先用内部的 query_tasks 获取所有占用时间的任务
+        query = TasksQuery(
+            project_names=request.project_names,
+            label_filters=request.label_filters,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            include_without_due=False,  # 空档计算只看有时间的任务
+            timezone=request.timezone,
+            limit=1000
+        )
+        
+        tasks_response = query_tasks(query)
+        
+        # 2. 把任务转换成忙碌时间段
+        busy_intervals = []
+        for task in tasks_response.tasks:
+            if not task.due_datetime:
+                continue  # 只处理有具体时间的任务
+            
+            start = task.due_datetime
+            
+            # 计算结束时间
+            if task.duration_minutes:
+                end = start + timedelta(minutes=task.duration_minutes)
+            else:
+                # 默认假设 1 小时
+                end = start + timedelta(hours=1)
+            
+            busy_intervals.append((start, end))
+        
+        # 3. 按开始时间排序
+        busy_intervals.sort(key=lambda x: x[0])
+        
+        # 4. 解析工作时间
+        try:
+            work_start_hour, work_start_min = map(int, request.workday_start.split(":"))
+            work_end_hour, work_end_min = map(int, request.workday_end.split(":"))
+        except:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid workday_start or workday_end format. Use 'HH:MM'"
+            )
+        
+        # 5. 按天扫描空档
+        free_slots = []
+        current_date = request.date_from.date()
+        end_date = request.date_to.date()
+        
+        while current_date <= end_date:
+            # 当天的工作时间范围
+            day_start = datetime.combine(
+                current_date,
+                datetime.min.time().replace(hour=work_start_hour, minute=work_start_min)
+            )
+            day_end = datetime.combine(
+                current_date,
+                datetime.min.time().replace(hour=work_end_hour, minute=work_end_min)
+            )
+            
+            # 筛选当天的忙碌区间
+            day_busy = [
+                (max(start, day_start), min(end, day_end))
+                for start, end in busy_intervals
+                if start.date() == current_date and end > day_start and start < day_end
+            ]
+            
+            # 合并重叠的忙碌区间
+            if day_busy:
+                day_busy.sort(key=lambda x: x[0])
+                merged = [day_busy[0]]
+                for start, end in day_busy[1:]:
+                    last_start, last_end = merged[-1]
+                    if start <= last_end:
+                        # 重叠，合并
+                        merged[-1] = (last_start, max(last_end, end))
+                    else:
+                        merged.append((start, end))
+                day_busy = merged
+            
+            # 计算空档
+            current_time = day_start
+            for busy_start, busy_end in day_busy:
+                if current_time < busy_start:
+                    # 有空档
+                    gap_minutes = (busy_start - current_time).total_seconds() / 60
+                    if gap_minutes >= request.min_slot_minutes:
+                        free_slots.append(FreeSlot(start=current_time, end=busy_start))
+                current_time = max(current_time, busy_end)
+            
+            # 最后一个忙碌区间后到工作日结束
+            if current_time < day_end:
+                gap_minutes = (day_end - current_time).total_seconds() / 60
+                if gap_minutes >= request.min_slot_minutes:
+                    free_slots.append(FreeSlot(start=current_time, end=day_end))
+            
+            current_date += timedelta(days=1)
+        
+        return FreeSlotResponse(free_slots=free_slots)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error computing free slots: {e}"
+        )

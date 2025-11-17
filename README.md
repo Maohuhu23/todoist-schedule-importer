@@ -4,19 +4,32 @@
 
 ## 项目简介
 
-本服务提供一个 REST API 接口 `POST /import_schedule_to_todoist`，可以：
+本服务提供**完整的读写 API**，支持课表导入、任务查询和空档计算：
 
+### 📝 写入接口
+**POST /import_schedule_to_todoist** - 批量导入课表
 - 📚 批量导入课表/时间块到 Todoist
 - 🏷️ 自动创建项目（Project）、标签（Label）和分组（Section）
 - 📂 **Section 分组支持**：按星期、科目等自动分类任务
 - ⏱️ **Duration 时长设置**：任务自带持续时间信息
 - 🌐 **多语言支持**：中文自然语言时间解析（due_lang）
-- 🔄 支持两种导入模式：
-  - `create`：追加任务
-  - `replace_project`：清空指定项目后重建整个课表
+- 🔄 支持两种导入模式：`create` / `replace_project`
 - 🧪 支持 `dry_run` 模式，模拟导入而不真正写入
-- ⚙️ 灵活的全局选项：默认项目/标签/优先级/时区/section、标题前后缀等
-- 🤖 完美适配 ChatGPT GPT Actions，让 AI 帮你解析课表并自动导入
+
+### 🔍 读取接口
+**POST /query_tasks** - 查询任务列表
+- 📋 按项目、标签、时间范围筛选任务
+- 📅 支持"今天有什么课"、"下周五的安排"等查询
+- 🗂️ 返回完整任务信息（section、duration、labels 等）
+
+**POST /free_slots** - 计算空档时间
+- 🕐 基于现有任务计算空闲时间段
+- ⚙️ 可配置工作时间范围和最小空档时长
+- 🎯 用于智能安排学习块和额外任务
+
+### 🤖 AI 集成
+- 完美适配 ChatGPT GPT Actions
+- 支持自然语言课表解析和智能时间规划
 
 ## 本地运行步骤
 
@@ -123,6 +136,61 @@ curl -X POST "http://localhost:8000/import_schedule_to_todoist" \
     "options": {
       "dry_run": true
     }
+  }'
+```
+
+### 6. 测试查询接口
+
+**查询 Schedule 项目的所有任务：**
+
+```bash
+curl -X POST "http://localhost:8000/query_tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_names": ["Schedule"],
+    "limit": 20
+  }'
+```
+
+**查询特定标签的任务：**
+
+```bash
+curl -X POST "http://localhost:8000/query_tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_names": ["Schedule"],
+    "label_filters": ["FMath"],
+    "limit": 10
+  }'
+```
+
+**查询特定时间范围的任务：**
+
+```bash
+curl -X POST "http://localhost:8000/query_tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_names": ["Schedule"],
+    "date_from": "2025-11-18T00:00:00+08:00",
+    "date_to": "2025-11-22T23:59:59+08:00",
+    "limit": 50
+  }'
+```
+
+### 7. 测试空档计算
+
+**查找本周的空闲时间段：**
+
+```bash
+curl -X POST "http://localhost:8000/free_slots" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_names": ["Schedule"],
+    "date_from": "2025-11-18T00:00:00+08:00",
+    "date_to": "2025-11-22T23:59:59+08:00",
+    "workday_start": "08:00",
+    "workday_end": "23:00",
+    "min_slot_minutes": 60
   }'
 ```
 
