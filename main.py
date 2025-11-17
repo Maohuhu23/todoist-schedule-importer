@@ -315,6 +315,18 @@ def build_due(item: ScheduleItem, tz_default: str) -> Optional[dict]:
 
 # ---------- 主接口 ----------
 
+@app.get("/")
+def health_check():
+    """
+    健康检查端点，用于 Render 等平台的部署验证
+    """
+    return {
+        "status": "healthy",
+        "service": "Todoist Schedule Importer v3",
+        "version": "3.0.0"
+    }
+
+
 @app.post("/import_schedule_to_todoist", response_model=ImportResponse)
 def import_schedule(body: ImportRequest):
     """
