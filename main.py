@@ -9,7 +9,7 @@ from enum import Enum
 TODOIST_API_TOKEN = os.environ.get("TODOIST_API_TOKEN")
 TODOIST_BASE_URL = "https://api.todoist.com/rest/v2"
 
-app = FastAPI(title="Todoist Schedule Importer v2")
+app = FastAPI(title="Todoist Schedule Importer v3")
 
 
 # ---------- 数据模型 ----------
@@ -52,6 +52,19 @@ class ScheduleItem(BaseModel):
     timezone: Optional[str] = Field(
         default=None,
         description="时区，比如 'Asia/Singapore'"
+    )
+    section_name: Optional[str] = Field(
+        default=None,
+        description="Todoist 项目中的 section 名称，例如 'Monday'、'IELTS'；不存在时会自动创建"
+    )
+    duration_minutes: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="任务持续时长（分钟），会映射到 Todoist 的 duration 字段"
+    )
+    due_lang: Optional[str] = Field(
+        default=None,
+        description="自然语言时间的语言代码，例如 'zh'（中文）、'en'（英文），提升 due_string 解析成功率"
     )
 
 
@@ -101,6 +114,14 @@ class ImportOptions(BaseModel):
     title_suffix: Optional[str] = Field(
         default=None,
         description="给所有任务标题统一加的后缀"
+    )
+    default_section_name: Optional[str] = Field(
+        default=None,
+        description="items 未指定 section_name 时的默认 section 名称"
+    )
+    layout_hint: Optional[str] = Field(
+        default=None,
+        description="布局提示（纯内部约定，用于指导 GPT 风格），例如：'by_weekday' / 'by_subject'"
     )
 
 
@@ -213,6 +234,40 @@ def get_or_create_label(name: str, label_map: Dict[str, str]) -> str:
     return label["id"]
 
 
+def fetch_sections(project_id: str) -> Dict[str, str]:
+    """
+    拉取某个项目下的所有 sections，返回 {section名: id}
+    """
+    resp = requests.get(
+        f"{TODOIST_BASE_URL}/sections",
+        headers=todoist_headers(),
+        params={"project_id": project_id},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    sections = resp.json()
+    return {s["name"]: s["id"] for s in sections}
+
+
+def get_or_create_section(name: str, project_id: str, section_map: Dict[str, str]) -> str:
+    """
+    获取 section ID；如果没有就在指定项目下创建
+    """
+    if name in section_map:
+        return section_map[name]
+
+    resp = requests.post(
+        f"{TODOIST_BASE_URL}/sections",
+        headers=todoist_headers(),
+        json={"name": name, "project_id": project_id},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    section = resp.json()
+    section_map[section["name"]] = section["id"]
+    return section["id"]
+
+
 def clear_project_tasks(project_id: str):
     """
     清空某项目下的所有未完成任务
@@ -241,11 +296,14 @@ def clear_project_tasks(project_id: str):
 def build_due(item: ScheduleItem, tz_default: str) -> Optional[dict]:
     """
     构造 Todoist 的 due 字段：
-    - 如果给了 due_string，就直接用
+    - 如果给了 due_string，就直接用（支持 due_lang 指定语言）
     - 否则如果给了 start_datetime，就用 datetime + timezone
     """
     if item.due_string:
-        return {"string": item.due_string}
+        due_obj = {"string": item.due_string}
+        if item.due_lang:
+            due_obj["lang"] = item.due_lang
+        return due_obj
 
     if item.start_datetime:
         tz = item.timezone or tz_default
@@ -264,8 +322,11 @@ def import_schedule(body: ImportRequest):
     - mode=create：只追加
     - mode=replace_project：清空某项目后重建
     - dry_run：只模拟，不真正写入 Todoist
-    - 默认项目 / 标签 / 优先级 / 时区
+    - 默认项目 / 标签 / 优先级 / 时区 / section
     - 标题统一前后缀
+    - section 分组（自动创建 section）
+    - duration 时长设置
+    - due_lang 自然语言时间解析（支持中文）
     """
     headers = todoist_headers()
 
@@ -323,6 +384,21 @@ def import_schedule(body: ImportRequest):
             if effective_project_name:
                 project_id = get_or_create_project(effective_project_name, project_map)
 
+            # 1.5. 处理 section（需要先有 project_id）
+            section_id = None
+            if project_id:
+                effective_section_name = item.section_name or options.default_section_name
+                if effective_section_name:
+                    # 获取该项目的 section 映射（为避免频繁请求，可优化为按项目缓存）
+                    try:
+                        section_map = fetch_sections(project_id)
+                        section_id = get_or_create_section(
+                            effective_section_name, project_id, section_map
+                        )
+                    except requests.RequestException as e:
+                        # Section 创建失败不影响任务创建，记录但继续
+                        pass
+
             # 2. 合并标签：item.labels + default_labels 去重
             all_labels = list(
                 dict.fromkeys((options.default_labels or []) + (item.labels or []))
@@ -366,10 +442,15 @@ def import_schedule(body: ImportRequest):
                 payload["description"] = description
             if project_id:
                 payload["project_id"] = project_id
+            if section_id:
+                payload["section_id"] = section_id
             if label_ids:
                 payload["labels"] = label_ids
             if due:
                 payload["due"] = due
+            if item.duration_minutes:
+                payload["duration"] = item.duration_minutes
+                payload["duration_unit"] = "minute"
 
             # dry_run：只返回"会创建什么"，不真正写入
             if options.dry_run:

@@ -1,4 +1,4 @@
-# Todoist Schedule Importer v2
+# Todoist Schedule Importer v3
 
 这是一个基于 **Python + FastAPI** 的 serverless 风格服务，用于批量将结构化课表或时间块导入到 Todoist 任务管理系统。
 
@@ -7,12 +7,15 @@
 本服务提供一个 REST API 接口 `POST /import_schedule_to_todoist`，可以：
 
 - 📚 批量导入课表/时间块到 Todoist
-- 🏷️ 自动创建项目（Project）和标签（Label）
+- 🏷️ 自动创建项目（Project）、标签（Label）和分组（Section）
+- 📂 **Section 分组支持**：按星期、科目等自动分类任务
+- ⏱️ **Duration 时长设置**：任务自带持续时间信息
+- 🌐 **多语言支持**：中文自然语言时间解析（due_lang）
 - 🔄 支持两种导入模式：
   - `create`：追加任务
   - `replace_project`：清空指定项目后重建整个课表
 - 🧪 支持 `dry_run` 模式，模拟导入而不真正写入
-- ⚙️ 灵活的全局选项：默认项目/标签/优先级/时区、标题前后缀等
+- ⚙️ 灵活的全局选项：默认项目/标签/优先级/时区/section、标题前后缀等
 - 🤖 完美适配 ChatGPT GPT Actions，让 AI 帮你解析课表并自动导入
 
 ## 本地运行步骤
@@ -68,31 +71,40 @@ curl -X POST "http://localhost:8000/import_schedule_to_todoist" \
   -d '{
     "items": [
       {
-        "title": "A2-1 Further Math",
-        "description": "教室：A203，老师：张老师",
+        "title": "Further Math",
+        "description": "教室：A203，张老师",
         "project_name": "课表",
-        "labels": ["A2-1", "Math"],
+        "section_name": "Monday",
+        "labels": ["FMath"],
         "priority": 2,
-        "due_string": "every Monday at 9:00"
+        "due_string": "每周一 09:05",
+        "due_lang": "zh",
+        "duration_minutes": 90
       },
       {
         "title": "Physics Lab",
         "description": "实验室 B101",
         "project_name": "课表",
-        "labels": ["A2-1", "Physics"],
+        "section_name": "Wednesday",
+        "labels": ["Phy2"],
         "priority": 3,
-        "start_datetime": "2025-11-18T14:00:00+08:00",
-        "end_datetime": "2025-11-18T16:00:00+08:00",
-        "timezone": "Asia/Singapore"
+        "due_string": "every Wednesday at 14:00",
+        "duration_minutes": 120
       }
     ],
     "options": {
       "mode": "create",
       "dry_run": false,
-      "title_prefix": "[课表] "
+      "title_prefix": "[A2-1] "
     }
   }'
 ```
+
+**v3 新功能说明：**
+
+- `section_name`: 指定 Todoist 项目中的 section（如 "Monday", "Wednesday"），任务会自动分组
+- `duration_minutes`: 任务持续时间（分钟），在 Todoist 中显示为时长
+- `due_lang`: 自然语言时间的语言代码（`zh` = 中文，`en` = 英文），提升中文时间解析准确率
 
 **Dry Run 测试（不真正写入）：**
 
